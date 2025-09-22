@@ -1,13 +1,25 @@
-import sqlite3, threading, time, json, random, requests, urllib.parse
+from dotenv import load_dotenv
+load_dotenv()
+import os, sqlite3, threading, time, json, requests, urllib.parse
 import telebot
 from telebot import types
+from flask import Flask, request, Response
+import logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-TOKEN = "8302142533:AAFx_OPV5Yunm-gKkQLASRNAfqraPP_EQMo"
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 API_SEARCH = "https://anilibria.top/api/v1/app/search/releases"
 SITE_SEARCH_BASE = "https://anilifetv.vercel.app/relizes?search="
-bot = telebot.TeleBot(TOKEN, parse_mode=None)
 
-conn = sqlite3.connect("bot_subs.db", check_same_thread=False)
+if not BOT_TOKEN:
+    logging.error("ENV BOT_TOKEN is not set. Set BOT_TOKEN and restart.")
+    raise SystemExit("Set BOT_TOKEN env var")
+
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode=None)
+
+db_path = os.environ.get("DB_PATH", "bot_subs.db")
+conn = sqlite3.connect(db_path, check_same_thread=False)
 cur = conn.cursor()
 cur.execute("CREATE TABLE IF NOT EXISTS subs (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, query TEXT NOT NULL, last_ids TEXT)")
 cur.execute("CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, action TEXT, created_at INTEGER DEFAULT (strftime('%s','now')))")
@@ -15,31 +27,61 @@ conn.commit()
 
 cache = {}
 
+HELP_TEXT = (
+    "Привет!\nЯ могу искать аниме, давать ссылки и подписывать на новинки.\n\n"
+    "Команды:\n"
+    "/find <название> — поиск\n"
+    "/new <название?> — последние релизы по запросу\n"
+    "/add <название> — подписаться\n"
+    "/remove <название> — отписаться\n"
+    "/list — показать подписки\n"
+    "/history — история действий\n"
+    "/random — случайный тайтл\n"
+    "/play <название или номер серии + название> — ссылка на просмотр\n"
+    "/webapp — открыть WebApp внутри Telegram\n"
+    "/help — список команд"
+)
+
 def anilibria_search(query, limit=8):
     try:
-        q = f'"{query}"' if query and query.strip() != "" else '"my"'
-        r = requests.get(API_SEARCH, params={"query": q, "limit": limit}, timeout=10)
+        q = (query or "").strip()
+        params = {"query": q if q != "" else '"my"', "limit": limit} if q == "" else {"query": q, "limit": limit}
+        r = requests.get(API_SEARCH, params=params, timeout=10)
         r.raise_for_status()
         data = r.json()
-        if isinstance(data, list):
+        if isinstance(data, list) and data:
             return data[:limit]
+        if isinstance(data, list) and not data and q:
+            try:
+                r2 = requests.get(API_SEARCH, params={"query": q.split()[0], "limit": limit}, timeout=8)
+                r2.raise_for_status()
+                d2 = r2.json()
+                if isinstance(d2, list):
+                    return d2[:limit]
+            except:
+                pass
         return []
     except Exception as e:
-        print("search err:", e)
+        logging.exception("search err")
         return []
 
 def make_site_link(query):
-    return SITE_SEARCH_BASE + urllib.parse.quote_plus(query)
+    q = str(query or "").strip()
+    return SITE_SEARCH_BASE + urllib.parse.quote_plus(q)
 
 def keyboard_for(items, chat_id):
     kb = types.InlineKeyboardMarkup()
     for it in items:
         aid = str(it.get("id") or it.get("releaseId") or "")
-        title = it.get("russian") or it.get("name") or (it.get("names", {}) if isinstance(it.get("names"), dict) else {}) or "Без названия"
-        if isinstance(title, dict):
-            title = title.get("ru") or next(iter(title.values()), "Без названия")
-        if isinstance(title, list):
-            title = title[0] if title else "Без названия"
+        title = it.get("russian") or it.get("name") or ""
+        if not title:
+            names = it.get("names")
+            if isinstance(names, dict):
+                title = names.get("ru") or next(iter(names.values()), "")
+            elif isinstance(names, list):
+                title = names[0] if names else ""
+        if not title:
+            title = "Без названия"
         row = [
             types.InlineKeyboardButton("Смотреть", url=make_site_link(title)),
             types.InlineKeyboardButton("Подробнее", callback_data=f"det|{aid}|{chat_id}")
@@ -58,25 +100,18 @@ def log_history(user_id, action):
     try:
         cur.execute("INSERT INTO history(user_id, action) VALUES(?,?)", (user_id, action))
         conn.commit()
-    except:
-        pass
+    except Exception:
+        logging.exception("log_history failed")
 
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
-    text = ("Привет!\nЯ могу искать аниме, давать ссылки и подписывать на новинки.\n\n"
-            "Команды:\n"
-            "/find <название> — поиск\n"
-            "/new <название?> — последние релизы по запросу\n"
-            "/add <название> — подписаться\n"
-            "/remove <название> — отписаться\n"
-            "/list — показать подписки\n"
-            "/history — история действий\n"
-            "/random — случайный тайтл\n"
-            "/play <название или номер серии + название> — ссылка на просмотр\n"
-            "/webapp — открыть WebApp внутри Telegram\n"
-            "/help — список команд")
-    bot.send_message(message.chat.id, text)
+    bot.send_message(message.chat.id, HELP_TEXT)
     log_history(message.chat.id, "/start")
+
+@bot.message_handler(commands=['help'])
+def cmd_help(message):
+    bot.send_message(message.chat.id, HELP_TEXT)
+    log_history(message.chat.id, "/help")
 
 @bot.message_handler(commands=['webapp'])
 def cmd_webapp(message):
@@ -99,13 +134,17 @@ def web_app_data_handler(message):
 
 @bot.message_handler(commands=['find', 'search'])
 def cmd_find(message):
-    parts = message.text.split(maxsplit=1)
+    parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2:
         bot.send_message(message.chat.id, "Использование: /find <название релиза>")
         return
     query = parts[1].strip()
     bot.send_message(message.chat.id, f"Ищу «{query}»...")
     items = anilibria_search(query, limit=8)
+    if not items:
+        simple = query.split()[0] if query else ""
+        if simple and simple != query:
+            items = anilibria_search(simple, limit=8)
     if not items:
         bot.send_message(message.chat.id, "Ничего не найдено.")
         return
@@ -116,7 +155,7 @@ def cmd_find(message):
 
 @bot.message_handler(commands=['f'])
 def cmd_f_short(message):
-    parts = message.text.split(maxsplit=1)
+    parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2:
         bot.send_message(message.chat.id, "Использование: /f <название>")
         return
@@ -125,7 +164,7 @@ def cmd_f_short(message):
 
 @bot.message_handler(commands=['new'])
 def cmd_new(message):
-    parts = message.text.split(maxsplit=1)
+    parts = (message.text or "").split(maxsplit=1)
     q = parts[1].strip() if len(parts) > 1 else ""
     items = anilibria_search(q, limit=8)
     if not items:
@@ -138,7 +177,7 @@ def cmd_new(message):
 
 @bot.message_handler(commands=['add'])
 def cmd_add(message):
-    parts = message.text.split(maxsplit=1)
+    parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2:
         bot.send_message(message.chat.id, "Использование: /add <название>")
         return
@@ -152,7 +191,7 @@ def cmd_add(message):
 
 @bot.message_handler(commands=['remove'])
 def cmd_remove(message):
-    parts = message.text.split(maxsplit=1)
+    parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2:
         bot.send_message(message.chat.id, "Использование: /remove <название>")
         return
@@ -184,23 +223,23 @@ def cmd_history(message):
     bot.send_message(message.chat.id, txt)
 
 @bot.message_handler(commands=['random'])
-def cmd_random(msg):
+def cmd_random(message):
     link = "https://anilifetv.vercel.app/random"
-    bot.send_message(msg.chat.id, f"Случайный тайтл: {link}")
-    log_history(msg.chat.id, "/random")
+    bot.send_message(message.chat.id, f"Случайный тайтл: {link}")
+    log_history(message.chat.id, "/random")
 
 @bot.message_handler(commands=['calendar'])
-def cmd_calendar(msg):
+def cmd_calendar(message):
     items = anilibria_search("", 8)
     if not items:
-        bot.send_message(msg.chat.id, "Не удалось получить расписание.")
+        bot.send_message(message.chat.id, "Не удалось получить расписание.")
         return
-    cache_items(msg.chat.id, items)
-    bot.send_message(msg.chat.id, "Последние релизы:", reply_markup=keyboard_for(items, msg.chat.id))
+    cache_items(message.chat.id, items)
+    bot.send_message(message.chat.id, "Последние релизы:", reply_markup=keyboard_for(items, message.chat.id))
 
 @bot.message_handler(commands=['play'])
 def cmd_play(message):
-    parts = message.text.split(maxsplit=1)
+    parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2:
         bot.send_message(message.chat.id, "Использование: /play <номер серии опционально + название релиза>")
         return
@@ -211,7 +250,7 @@ def cmd_play(message):
 
 @bot.message_handler(commands=['bug'])
 def cmd_bug(message):
-    parts = message.text.split(maxsplit=1)
+    parts = (message.text or "").split(maxsplit=1)
     text = parts[1].strip() if len(parts) > 1 else ""
     log_history(message.chat.id, f"/bug {text}")
     bot.send_message(message.chat.id, "Спасибо! Сообщение принято, админ увидит.")
@@ -280,15 +319,42 @@ def check_subs_loop(interval=1800):
                         try:
                             bot.send_message(user_id, f"Новый релиз по подписке «{query}»: {title}\n{link}")
                         except Exception as e:
-                            print("notify err", e)
+                            logging.exception("notify err")
                     cur.execute("UPDATE subs SET last_ids = ? WHERE id = ?", (json.dumps(current_ids), sid))
                     conn.commit()
-        except Exception as e:
-            print("subs loop err", e)
+        except Exception:
+            logging.exception("subs loop err")
         time.sleep(interval)
 
 t = threading.Thread(target=check_subs_loop, args=(1800,), daemon=True)
 t.start()
 
-print("Bot started")
-bot.infinity_polling()
+app = Flask(__name__)
+
+@app.route("/" + BOT_TOKEN, methods=['POST'])
+def receive_update():
+    json_str = request.get_data().decode('UTF-8')
+    update = telebot.types.Update.de_json(json_str)
+    bot.process_new_updates([update])
+    return "ok", 200
+
+@app.route("/set_webhook", methods=['GET'])
+def set_webhook():
+    try:
+        if not WEBHOOK_URL:
+            return "Set WEBHOOK_URL env var", 400
+        bot.remove_webhook()
+        url = WEBHOOK_URL.rstrip('/') + '/' + BOT_TOKEN
+        success = bot.set_webhook(url=url)
+        return ("Webhook set" if success else "Webhook failed"), 200
+    except Exception as e:
+        logging.exception("set_webhook error")
+        return str(e), 500
+
+@app.route("/")
+def index():
+    return "Bot is running", 200
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
