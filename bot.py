@@ -73,9 +73,29 @@ def cmd_start(message):
             "/history — история действий\n"
             "/random — случайный тайтл\n"
             "/play <название или номер серии + название> — ссылка на просмотр\n"
+            "/webapp — открыть WebApp внутри Telegram\n"
             "/help — список команд")
     bot.send_message(message.chat.id, text)
     log_history(message.chat.id, "/start")
+
+@bot.message_handler(commands=['webapp'])
+def cmd_webapp(message):
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(types.KeyboardButton("Открыть WebApp 🚀", web_app=types.WebAppInfo("https://anilifetv.vercel.app/")))
+    kb.add(types.KeyboardButton("Закрыть клавиатуру"))
+    bot.send_message(message.chat.id, "Нажми кнопку, чтобы открыть WebApp внутри Telegram.", reply_markup=kb)
+    log_history(message.chat.id, "/webapp")
+
+@bot.message_handler(func=lambda m: getattr(m, "web_app_data", None) is not None)
+def web_app_data_handler(message):
+    data = message.web_app_data.data
+    try:
+        payload = json.loads(data)
+        pretty = json.dumps(payload, ensure_ascii=False, indent=2)
+    except:
+        pretty = data
+    bot.send_message(message.chat.id, f"Получил данные из WebApp:\n{pretty}")
+    log_history(message.chat.id, f"webapp_data {str(pretty)[:200]}")
 
 @bot.message_handler(commands=['find', 'search'])
 def cmd_find(message):
@@ -203,7 +223,10 @@ def cb_details(call):
     except:
         bot.answer_callback_query(call.id, "Ошибка данных")
         return
-    orig_chat = int(orig_chat)
+    try:
+        orig_chat = int(orig_chat)
+    except:
+        orig_chat = call.message.chat.id
     item = cache.get(orig_chat, {}).get(aid) or cache.get(call.message.chat.id, {}).get(aid)
     if not item:
         bot.answer_callback_query(call.id, "Детали не найдены (кеш устарел).")
@@ -226,7 +249,7 @@ def cb_details(call):
 def text_handler(message):
     if message.text and message.text.startswith("/"):
         return
-    q = message.text.strip()
+    q = (message.text or "").strip()
     if not q:
         bot.send_message(message.chat.id, "Напиши название аниме.")
         return
