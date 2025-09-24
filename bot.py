@@ -9,7 +9,7 @@ import logging
 import requests
 import urllib.parse
 import re
-from flask import Flask, request, jsonify
+from flask import Flask, request
 import telebot
 from telebot import types
 
@@ -100,98 +100,148 @@ def send_card_with_buttons(chat_id, query):
 
 @bot.message_handler(commands=['start','help'])
 def cmd_start(message):
-    bot.send_message(message.chat.id, HELP_TEXT)
-    log_history(message.chat.id, "/start|/help")
+    try:
+        logging.info("Handler /start triggered for %s", message.chat.id)
+        bot.send_message(message.chat.id, HELP_TEXT)
+        bot.send_message(ADMIN_CHAT, f"DBG: /start from {message.chat.id}")
+        log_history(message.chat.id, "/start|/help")
+    except Exception:
+        logging.exception("cmd_start failed")
 
 @bot.message_handler(commands=['webapp'])
 def cmd_webapp(message):
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add(types.KeyboardButton("Открыть WebApp 🚀", web_app=types.WebAppInfo("https://anilifetv.vercel.app/")))
-    bot.send_message(message.chat.id, "Открыть WebApp:", reply_markup=kb)
-    log_history(message.chat.id, "/webapp")
+    try:
+        logging.info("Handler /webapp triggered for %s", message.chat.id)
+        kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        kb.add(types.KeyboardButton("Открыть WebApp 🚀", web_app=types.WebAppInfo("https://anilifetv.vercel.app/")))
+        bot.send_message(message.chat.id, "Открыть WebApp:", reply_markup=kb)
+        bot.send_message(ADMIN_CHAT, f"DBG: /webapp from {message.chat.id}")
+        log_history(message.chat.id, "/webapp")
+    except Exception:
+        logging.exception("cmd_webapp failed")
 
 @bot.message_handler(commands=['play'])
 def cmd_play(message):
-    parts = (message.text or "").split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip():
-        bot.send_message(message.chat.id, "Использование: /play <название>")
-        return
-    q = parts[1].strip()
-    send_card_with_buttons(message.chat.id, q)
-    log_history(message.chat.id, f"/play {q}")
+    try:
+        logging.info("Handler /play triggered for %s", message.chat.id)
+        parts = (message.text or "").split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            bot.send_message(message.chat.id, "Использование: /play <название>")
+            return
+        q = parts[1].strip()
+        send_card_with_buttons(message.chat.id, q)
+        bot.send_message(ADMIN_CHAT, f"DBG: /play '{q}' from {message.chat.id}")
+        log_history(message.chat.id, f"/play {q}")
+    except Exception:
+        logging.exception("cmd_play failed")
 
 @bot.message_handler(commands=['find','search'])
 def cmd_find(message):
-    parts = (message.text or "").split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip():
-        bot.send_message(message.chat.id, "Использование: /find <название>")
-        return
-    q = parts[1].strip()
-    bot.send_message(message.chat.id, f"Ищу «{q}»...")
-    send_card_with_buttons(message.chat.id, q)
-    log_history(message.chat.id, f"/find {q}")
+    try:
+        logging.info("Handler /find triggered for %s", message.chat.id)
+        parts = (message.text or "").split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            bot.send_message(message.chat.id, "Использование: /find <название>")
+            return
+        q = parts[1].strip()
+        bot.send_message(message.chat.id, f"Ищу «{q}»...")
+        send_card_with_buttons(message.chat.id, q)
+        bot.send_message(ADMIN_CHAT, f"DBG: /find '{q}' from {message.chat.id}")
+        log_history(message.chat.id, f"/find {q}")
+    except Exception:
+        logging.exception("cmd_find failed")
 
 @bot.message_handler(commands=['new'])
 def cmd_new(message):
-    parts = (message.text or "").split(maxsplit=1)
-    q = parts[1].strip() if len(parts) > 1 else ""
-    url = make_site_link(q)
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("📥 Открыть релизы", url=url))
-    bot.send_message(message.chat.id, f"Последние релизы по «{q or 'всему'}':", reply_markup=kb)
-    log_history(message.chat.id, f"/new {q}")
+    try:
+        logging.info("Handler /new triggered for %s", message.chat.id)
+        parts = (message.text or "").split(maxsplit=1)
+        q = parts[1].strip() if len(parts) > 1 else ""
+        url = make_site_link(q)
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("📥 Открыть релизы", url=url))
+        bot.send_message(message.chat.id, f"Последние релизы по «{q or 'всему'}':", reply_markup=kb)
+        bot.send_message(ADMIN_CHAT, f"DBG: /new '{q}' from {message.chat.id}")
+        log_history(message.chat.id, f"/new {q}")
+    except Exception:
+        logging.exception("cmd_new failed")
 
 @bot.message_handler(commands=['add'])
 def cmd_add(message):
-    parts = (message.text or "").split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip():
-        bot.send_message(message.chat.id, "Использование: /add <название>")
-        return
-    q = parts[1].strip()
-    cur.execute("INSERT INTO subs(user_id, query, last_ids) VALUES(?,?,?)", (message.chat.id, q, json.dumps([])))
-    conn.commit()
-    bot.send_message(message.chat.id, f"✅ Подписка на «{q}» создана.")
-    log_history(message.chat.id, f"/add {q}")
+    try:
+        logging.info("Handler /add triggered for %s", message.chat.id)
+        parts = (message.text or "").split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            bot.send_message(message.chat.id, "Использование: /add <название>")
+            return
+        q = parts[1].strip()
+        cur.execute("INSERT INTO subs(user_id, query, last_ids) VALUES(?,?,?)", (message.chat.id, q, json.dumps([])))
+        conn.commit()
+        bot.send_message(message.chat.id, f"✅ Подписка на «{q}» создана.")
+        bot.send_message(ADMIN_CHAT, f"DBG: /add '{q}' from {message.chat.id}")
+        log_history(message.chat.id, f"/add {q}")
+    except Exception:
+        logging.exception("cmd_add failed")
 
 @bot.message_handler(commands=['remove'])
 def cmd_remove(message):
-    parts = (message.text or "").split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip():
-        bot.send_message(message.chat.id, "Использование: /remove <название>")
-        return
-    q = parts[1].strip()
-    cur.execute("DELETE FROM subs WHERE user_id=? AND query=?", (message.chat.id, q))
-    conn.commit()
-    bot.send_message(message.chat.id, f"❌ Отписан(а) от «{q}».")
-    log_history(message.chat.id, f"/remove {q}")
+    try:
+        logging.info("Handler /remove triggered for %s", message.chat.id)
+        parts = (message.text or "").split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            bot.send_message(message.chat.id, "Использование: /remove <название>")
+            return
+        q = parts[1].strip()
+        cur.execute("DELETE FROM subs WHERE user_id=? AND query=?", (message.chat.id, q))
+        conn.commit()
+        bot.send_message(message.chat.id, f"❌ Отписан(а) от «{q}».")
+        bot.send_message(ADMIN_CHAT, f"DBG: /remove '{q}' from {message.chat.id}")
+        log_history(message.chat.id, f"/remove {q}")
+    except Exception:
+        logging.exception("cmd_remove failed")
 
 @bot.message_handler(commands=['list'])
 def cmd_list(message):
-    cur.execute("SELECT query FROM subs WHERE user_id=?", (message.chat.id,))
-    rows = cur.fetchall()
-    if not rows:
-        bot.send_message(message.chat.id, "У тебя нет подписок.")
-        return
-    bot.send_message(message.chat.id, "📝 Твои подписки:\n" + "\n".join(f"- {r[0]}" for r in rows))
-    log_history(message.chat.id, "/list")
+    try:
+        logging.info("Handler /list triggered for %s", message.chat.id)
+        cur.execute("SELECT query FROM subs WHERE user_id=?", (message.chat.id,))
+        rows = cur.fetchall()
+        if not rows:
+            bot.send_message(message.chat.id, "У тебя нет подписок.")
+            return
+        bot.send_message(message.chat.id, "📝 Твои подписки:\n" + "\n".join(f"- {r[0]}" for r in rows))
+        bot.send_message(ADMIN_CHAT, f"DBG: /list from {message.chat.id}")
+        log_history(message.chat.id, "/list")
+    except Exception:
+        logging.exception("cmd_list failed")
 
 @bot.message_handler(commands=['history'])
 def cmd_history(message):
-    cur.execute("SELECT action, created_at FROM history WHERE user_id=? ORDER BY id DESC LIMIT 30", (message.chat.id,))
-    rows = cur.fetchall()
-    if not rows:
-        bot.send_message(message.chat.id, "История пустая.")
-        return
-    txt = "\n".join(f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(r[1]))}: {r[0]}" for r in rows)
-    bot.send_message(message.chat.id, txt)
+    try:
+        logging.info("Handler /history triggered for %s", message.chat.id)
+        cur.execute("SELECT action, created_at FROM history WHERE user_id=? ORDER BY id DESC LIMIT 30", (message.chat.id,))
+        rows = cur.fetchall()
+        if not rows:
+            bot.send_message(message.chat.id, "История пустая.")
+            return
+        txt = "\n".join(f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(r[1]))}: {r[0]}" for r in rows)
+        bot.send_message(message.chat.id, txt)
+        bot.send_message(ADMIN_CHAT, f"DBG: /history from {message.chat.id}")
+    except Exception:
+        logging.exception("cmd_history failed")
 
 @bot.message_handler(func=lambda m: True)
 def text_handler(message):
-    txt = (message.text or "").strip()
-    if not txt or txt.startswith("/"):
-        return
-    send_card_with_buttons(message.chat.id, txt)
-    log_history(message.chat.id, f"search {txt}")
+    try:
+        logging.info("Handler text triggered for %s: %s", message.chat.id, (message.text or "")[:200])
+        txt = (message.text or "").strip()
+        if not txt or txt.startswith("/"):
+            return
+        send_card_with_buttons(message.chat.id, txt)
+        bot.send_message(ADMIN_CHAT, f"DBG: text search '{txt}' from {message.chat.id}")
+        log_history(message.chat.id, f"search {txt}")
+    except Exception:
+        logging.exception("text_handler failed")
 
 def subs_loop(interval=1800):
     while True:
@@ -219,6 +269,19 @@ TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 def receive_update():
     payload = request.get_data().decode('utf-8')
     logging.info("INCOMING UPDATE (first 2000 chars): %s", payload[:2000])
+    # короткое уведомление админу о приходе апдейта
+    try:
+        js = json.loads(payload)
+        uid = None
+        txt = None
+        try:
+            uid = js.get("message", {}).get("from", {}).get("id") or js.get("callback_query", {}).get("from", {}).get("id")
+            txt = js.get("message", {}).get("text") or js.get("callback_query", {}).get("data")
+        except Exception:
+            pass
+        bot.send_message(ADMIN_CHAT, f"INCOMING UPDATE from {uid}: {str(txt)[:200]}")
+    except Exception:
+        logging.exception("notify admin about incoming update failed")
     try:
         update = telebot.types.Update.de_json(payload)
         try:
@@ -226,7 +289,7 @@ def receive_update():
         except Exception:
             logging.exception("process_new_updates failed")
             try:
-                bot.send_message(ADMIN_CHAT, f"process_new_updates failed. See logs.")
+                bot.send_message(ADMIN_CHAT, f"process_new_updates failed for update from {uid}")
             except Exception:
                 logging.exception("notify admin failed")
     except Exception:
