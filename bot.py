@@ -1,198 +1,170 @@
 from dotenv import load_dotenv
 load_dotenv()
-
-import os
-import sqlite3
-import threading
-import time
-import json
-import urllib.parse
-import requests
-import logging
-
+import os, sqlite3, threading, time, json, logging, requests, urllib.parse
+from flask import Flask, request
 import telebot
 from telebot import types
-from flask import Flask, request
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-BOT_TOKEN = "8302142533:AAFubqIIS3JBg4DeQxZW7mom0MsYYUSJsE8"
-WEBHOOK_URL = "https://anilife-bot.onrender.com" 
+BOT_TOKEN = os.environ.get("BOT_TOKEN") or "8302142533:AAFubqIIS3JBg4DeQxZW7mom0MsYYUSJsE8"
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL") or "https://anilife-bot.onrender.com"
 SITE_SEARCH_BASE = "https://anilifetv.vercel.app/relizes?search="
+API_SEARCH = "https://anilibria.top/api/v1/app/search/releases"
 
 if not BOT_TOKEN:
-    logging.error("BOT_TOKEN is not set. Exiting.")
-    raise SystemExit("Set BOT_TOKEN")
+    logging.error("BOT_TOKEN missing")
+    raise SystemExit("BOT_TOKEN missing")
 
+TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode='HTML')
 
-DB_PATH = os.environ.get("DB_PATH", "bot_subs.db")
-conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+DB = os.environ.get("DB_PATH", "bot_subs.db")
+conn = sqlite3.connect(DB, check_same_thread=False)
 cur = conn.cursor()
-cur.execute("""
-CREATE TABLE IF NOT EXISTS subs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    query TEXT NOT NULL,
-    last_ids TEXT
-)
-""")
-cur.execute("""
-CREATE TABLE IF NOT EXISTS history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    action TEXT,
-    created_at INTEGER DEFAULT (strftime('%s','now'))
-)
-""")
+cur.execute("CREATE TABLE IF NOT EXISTS subs (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, query TEXT NOT NULL, last_ids TEXT)")
+cur.execute("CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, action TEXT, created_at INTEGER DEFAULT (strftime('%s','now')))")
 conn.commit()
 
 cache = {}
 
 HELP_TEXT = (
     "👋 <b>AniLife_tv</b>\n\n"
-    "Я могу искать аниме, давать быстрые ссылки и подписывать на новинки.\n\n"
     "Команды:\n"
-    "/new <название?> — последние релизы (ссылка)\n"
+    "/find <название> — поиск (покажу карточку и кнопки)\n"
+    "/new <название?> — последние релизы\n"
     "/add <название> — подписаться\n"
     "/remove <название> — отписаться\n"
-    "/list — показать подписки\n"
-    "/history — история действий\n"
-    "/random — случайный тайтл\n"
-    "/play <название или номер серии + название> — ссылка на просмотр\n"
-    "/webapp — открыть WebApp внутри Telegram\n"
+    "/list — подписки\n"
+    "/history — история\n"
+    "/play <название> — открыть на сайте\n"
+    "/webapp — открыть WebApp\n"
     "/help — это сообщение\n"
 )
 
-def make_site_link(query: str) -> str:
-    q = str(query or "").strip()
-    return SITE_SEARCH_BASE + urllib.parse.quote_plus(q)
-
-def log_history(user_id: int, action: str):
+def log_history(user_id, action):
     try:
         cur.execute("INSERT INTO history(user_id, action) VALUES(?,?)", (user_id, action))
         conn.commit()
     except Exception:
         logging.exception("log_history failed")
 
-def send_search_result(chat_id: int, query: str, label: str = None):
-    """Единая функция для /play и /find — отправляет красивый ответ с инлайн-кнопками."""
-    q = (query or "").strip()
-    if not q:
-        bot.send_message(chat_id, "Неверный запрос — укажи название.")
+def make_site_link(q):
+    return SITE_SEARCH_BASE + urllib.parse.quote_plus(str(q or "").strip())
+
+def anilibria_search(query, limit=6):
+    try:
+        q = (query or "").strip()
+        params = {"query": q if q != "" else '"my"', "limit": limit}
+        r = requests.get(API_SEARCH, params=params, timeout=8)
+        r.raise_for_status()
+        data = r.json()
+        if isinstance(data, list):
+            return data[:limit]
+        return []
+    except Exception:
+        logging.exception("anilibria_search error")
+        return []
+
+def send_search_as_rich(chat_id, query):
+    items = anilibria_search(query, limit=6)
+    if not items:
+        url = make_site_link(query)
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("Открыть результаты на сайте", url=url))
+        bot.send_message(chat_id, f"Ничего не нашёл через API.\nОткрыть поиск на сайте: {url}", reply_markup=kb)
         return
 
-    url = make_site_link(q)
-    title = f"🔎 Результаты по: <b>{q}</b>"
+    cache.setdefault(chat_id, {})
+    for it in items:
+        aid = str(it.get("id") or it.get("releaseId") or "")
+        if aid:
+            cache[chat_id][aid] = it
 
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        types.InlineKeyboardButton("🌐 Открыть в браузере", url="https://anilifetv.vercel.app/"),
-        types.InlineKeyboardButton("🚀 Открыть WebApp", url="https://anilifetv.vercel.app/")
-    )
-    kb.add(types.InlineKeyboardButton("🔁 Повторить поиск в чате", switch_inline_query_current_chat=q))
+    first = items[0]
+    title = first.get("russian") or first.get("name") or (first.get("names", {}) if isinstance(first.get("names"), dict) else {}).get("ru") or "Без названия"
+    desc = first.get("description") or first.get("anons") or ""
+    poster = first.get("poster") or first.get("cover") or None
+    caption = f"<b>{title}</b>\n\n{(desc[:700] + '...') if len(desc) > 700 else desc}"
 
-    bot.send_message(chat_id, f"{title}\n\nОткрыть результаты поиска по запросу — нажми кнопку ниже.", reply_markup=kb, disable_web_page_preview=False)
-    log_history(chat_id, f"{label or '/find'} {q}")
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for it in items:
+        aid = str(it.get("id") or it.get("releaseId") or "")
+        t = it.get("russian") or it.get("name") or (it.get("names", {}) if isinstance(it.get("names"), dict) else {}).get("ru") or "Без названия"
+        kb.add(types.InlineKeyboardButton(text=(t[:45] + ("…" if len(t) > 45 else "")), callback_data=f"det|{aid}|{chat_id}"))
+    kb.add(types.InlineKeyboardButton("Открыть поиск на сайте", url=make_site_link(query)))
 
-@bot.message_handler(commands=['start', 'help'])
-def cmd_start_help(message):
+    try:
+        if poster and poster.startswith("http"):
+            bot.send_photo(chat_id, poster, caption=caption, parse_mode='HTML', reply_markup=kb)
+        else:
+            bot.send_message(chat_id, caption, parse_mode='HTML', reply_markup=kb)
+    except Exception:
+        logging.exception("send_search_as_rich send error")
+        bot.send_message(chat_id, f"{title}\n{make_site_link(title)}", reply_markup=kb)
+
+@bot.message_handler(commands=['start','help'])
+def cmd_start(message):
     bot.send_message(message.chat.id, HELP_TEXT)
-    log_history(message.chat.id, "/start/help")
+    log_history(message.chat.id, "/start|/help")
 
 @bot.message_handler(commands=['webapp'])
 def cmd_webapp(message):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add(types.KeyboardButton("Открыть WebApp 🚀", web_app=types.WebAppInfo("https://anilifetv.vercel.app/")))
-    bot.send_message(message.chat.id, "Нажми кнопку, чтобы открыть WebApp внутри Telegram.", reply_markup=kb)
+    kb.add(types.KeyboardButton("Открыть WebApp", web_app=types.WebAppInfo("https://anilifetv.vercel.app/")))
+    bot.send_message(message.chat.id, "Открыть WebApp:", reply_markup=kb)
     log_history(message.chat.id, "/webapp")
 
 @bot.message_handler(commands=['play'])
 def cmd_play(message):
     parts = (message.text or "").split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip():
-        bot.send_message(message.chat.id, "Использование: /play <название или номер серии + название>")
+    if len(parts) < 2:
+        bot.send_message(message.chat.id, "Использование: /play <название>")
         return
-    query = parts[1].strip()
-    send_search_result(message.chat.id, query, label="/play")
-
-@bot.message_handler(commands=['new'])
-def cmd_new(message):
-    parts = (message.text or "").split(maxsplit=1)
-    query = parts[1].strip() if len(parts) > 1 else ""
-    url = make_site_link(query)
+    q = parts[1].strip()
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("📥 Открыть релизы", url=url))
-    bot.send_message(message.chat.id, f"Последние релизы по «{query or 'всему'}':", reply_markup=kb)
-    log_history(message.chat.id, f"/new {query}")
+    kb.add(types.InlineKeyboardButton("Открыть на сайте", url=make_site_link(q)))
+    bot.send_message(message.chat.id, f"Открыть: {make_site_link(q)}", reply_markup=kb)
+    log_history(message.chat.id, f"/play {q}")
 
-@bot.message_handler(commands=['add'])
-def cmd_add(message):
+@bot.message_handler(commands=['find','search'])
+def cmd_find(message):
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip():
-        bot.send_message(message.chat.id, "Использование: /add <название>")
+        bot.send_message(message.chat.id, "Использование: /find <название>")
         return
-    query = parts[1].strip()
-    cur.execute("INSERT INTO subs(user_id, query, last_ids) VALUES(?,?,?)", (message.chat.id, query, json.dumps([])))
-    conn.commit()
-    bot.send_message(message.chat.id, f"✅ Подписка на «{query}» создана.")
-    log_history(message.chat.id, f"/add {query}")
+    q = parts[1].strip()
+    bot.send_message(message.chat.id, f"Ищу «{q}»...")
+    send_search_as_rich(message.chat.id, q)
+    log_history(message.chat.id, f"/find {q}")
 
-@bot.message_handler(commands=['remove'])
-def cmd_remove(message):
-    parts = (message.text or "").split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip():
-        bot.send_message(message.chat.id, "Использование: /remove <название>")
+@bot.callback_query_handler(func=lambda call: call.data and call.data.startswith("det|"))
+def cb_det(call):
+    try:
+        _, aid, orig = call.data.split("|")
+        orig = int(orig)
+    except Exception:
+        bot.answer_callback_query(call.id, "Ошибка данных")
         return
-    query = parts[1].strip()
-    cur.execute("DELETE FROM subs WHERE user_id=? AND query=?", (message.chat.id, query))
-    conn.commit()
-    bot.send_message(message.chat.id, f"❌ Отписан(а) от «{query}».")
-    log_history(message.chat.id, f"/remove {query}")
+    item = cache.get(orig, {}).get(aid) or cache.get(call.message.chat.id, {}).get(aid)
+    if not item:
+        bot.answer_callback_query(call.id, "Детали не найдены (кеш устарел).")
+        return
+    title = item.get("russian") or item.get("name") or "Без названия"
+    desc = item.get("description") or item.get("anons") or ""
+    poster = item.get("poster") or item.get("cover") or None
+    text = f"<b>{title}</b>\n\n{(desc[:900] + '...') if len(desc) > 900 else desc}"
+    try:
+        if poster and poster.startswith("http"):
+            bot.send_photo(call.message.chat.id, poster, caption=text, parse_mode='HTML')
+        else:
+            bot.send_message(call.message.chat.id, text, parse_mode='HTML')
+    except Exception:
+        bot.send_message(call.message.chat.id, text)
+    bot.answer_callback_query(call.id)
+    log_history(call.message.chat.id, f"detail {aid}")
 
-@bot.message_handler(commands=['list'])
-def cmd_list(message):
-    cur.execute("SELECT query FROM subs WHERE user_id=?", (message.chat.id,))
-    rows = cur.fetchall()
-    if not rows:
-        bot.send_message(message.chat.id, "У тебя нет подписок.")
-        return
-    bot.send_message(message.chat.id, "📝 Твои подписки:\n" + "\n".join(f"- {r[0]}" for r in rows))
-    log_history(message.chat.id, "/list")
-
-@bot.message_handler(commands=['history'])
-def cmd_history(message):
-    cur.execute("SELECT action, created_at FROM history WHERE user_id=? ORDER BY id DESC LIMIT 30", (message.chat.id,))
-    rows = cur.fetchall()
-    if not rows:
-        bot.send_message(message.chat.id, "История пустая.")
-        return
-    txt = "\n".join(f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(r[1]))}: {r[0]}" for r in rows)
-    bot.send_message(message.chat.id, txt)
-
-@bot.message_handler(commands=['random'])
-def cmd_random(message):
-    url = "https://anilifetv.vercel.app/random"
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("🎲 Открыть случайный тайтл", url=url))
-    bot.send_message(message.chat.id, "Случайный тайтл:", reply_markup=kb)
-    log_history(message.chat.id, "/random")
-
-@bot.message_handler(func=lambda m: True)
-def text_handler(message):
-    text = (message.text or "").strip()
-    if not text:
-        return
-    if text.startswith("/"):
-        return
-    kb = types.InlineKeyboardMarkup()
-    url = make_site_link(text)
-    kb.add(
-        types.InlineKeyboardButton("🔎 Открыть результаты", url=url),
-        types.InlineKeyboardButton("🚀 Открыть WebApp", url="https://anilifetv.vercel.app/")
-    )
-    bot.send_message(message.chat.id, f"Найти <b>{text}</b> — открой результат ниже.", reply_markup=kb)
-    log_history(message.chat.id, f"search {text}")
+app = Flask(__name__)
 
 def check_subs_loop(interval=1800):
     while True:
@@ -200,12 +172,17 @@ def check_subs_loop(interval=1800):
             cur.execute("SELECT id,user_id,query,last_ids FROM subs")
             rows = cur.fetchall()
             for sid, user_id, query, last_ids_json in rows:
-                url = make_site_link(query)
-                try:
-                    bot.send_message(user_id, f"🔔 Новое (или периодическое) уведомление по «{query}»: {url}")
-                except Exception:
-                    logging.exception("notify err")
-                cur.execute("UPDATE subs SET last_ids=? WHERE id=?", (json.dumps([query]), sid))
+                items = anilibria_search(query, limit=6)
+                current_ids = [str(it.get("id") or it.get("releaseId") or "") for it in items]
+                last_ids = json.loads(last_ids_json or "[]")
+                new = [it for it in items if str(it.get("id") or it.get("releaseId") or "") not in last_ids]
+                for ni in new:
+                    title = ni.get("russian") or ni.get("name") or "Без названия"
+                    try:
+                        bot.send_message(user_id, f"Новый релиз по подписке «{query}»: {title}\n{make_site_link(title)}")
+                    except Exception:
+                        logging.exception("notify failed")
+                cur.execute("UPDATE subs SET last_ids=? WHERE id=?", (json.dumps(current_ids), sid))
                 conn.commit()
         except Exception:
             logging.exception("subs loop err")
@@ -213,12 +190,15 @@ def check_subs_loop(interval=1800):
 
 threading.Thread(target=check_subs_loop, args=(1800,), daemon=True).start()
 
-app = Flask(__name__)
-
 @app.route("/" + BOT_TOKEN, methods=['POST'])
 def receive_update():
-    update = telebot.types.Update.de_json(request.get_data().decode('utf-8'))
-    bot.process_new_updates([update])
+    raw = request.get_data().decode('utf-8')
+    logging.info("INCOMING UPDATE (first 1000 chars): %s", raw[:1000])
+    try:
+        update = telebot.types.Update.de_json(raw)
+        bot.process_new_updates([update])
+    except Exception:
+        logging.exception("process update failed")
     return "ok", 200
 
 @app.route("/set_webhook", methods=['GET'])
@@ -232,11 +212,29 @@ def set_webhook():
         logging.exception("set_webhook error")
         return "error", 500
 
+@app.route("/delete_webhook", methods=['GET'])
+def delete_webhook():
+    try:
+        resp = requests.get(f"{TELEGRAM_API}/deleteWebhook", timeout=10)
+        return resp.text, resp.status_code
+    except Exception:
+        logging.exception("delete_webhook error")
+        return "error", 500
+
+@app.route("/webhook_info", methods=['GET'])
+def webhook_info():
+    try:
+        resp = requests.get(f"{TELEGRAM_API}/getWebhookInfo", timeout=10)
+        return resp.text, resp.status_code
+    except Exception:
+        logging.exception("webhook_info error")
+        return "error", 500
+
 @app.route("/")
 def index():
     return "Bot is running", 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logging.info(f"Starting app on 0.0.0.0:{port}")
+    logging.info("Starting on port %s", port)
     app.run(host="0.0.0.0", port=port)
