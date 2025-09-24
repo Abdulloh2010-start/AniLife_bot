@@ -1,7 +1,15 @@
 from dotenv import load_dotenv
 load_dotenv()
-import os, sqlite3, threading, time, json, logging, requests, urllib.parse, re
-from flask import Flask, request
+import os
+import sqlite3
+import threading
+import time
+import json
+import logging
+import requests
+import urllib.parse
+import re
+from flask import Flask, request, jsonify
 import telebot
 from telebot import types
 
@@ -10,6 +18,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 BOT_TOKEN = os.environ.get("BOT_TOKEN") or "8302142533:AAFubqIIS3JBg4DeQxZW7mom0MsYYUSJsE8"
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL") or "https://anilife-bot.onrender.com"
 SITE_SEARCH_BASE = "https://anilifetv.vercel.app/relizes?search="
+ADMIN_CHAT = int(os.environ.get("ADMIN_CHAT") or 1901197148)
 
 if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN missing")
@@ -23,17 +32,15 @@ cur.execute("CREATE TABLE IF NOT EXISTS subs (id INTEGER PRIMARY KEY AUTOINCREME
 cur.execute("CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, action TEXT, created_at INTEGER DEFAULT (strftime('%s','now')))")
 conn.commit()
 
-cache = {}
-
 HELP_TEXT = (
     "👋 <b>AniLife_tv</b>\n\n"
-    "/find <название> — поиск (открывает страницу результатов на сайте и показывает карточку)\n"
-    "/new <название?> — последние релизы (ссылка)\n"
+    "/find <название> — найти (открыть страницу на сайте)\n"
+    "/play <название> — открыть на сайте\n"
+    "/new <название?> — последние релизы\n"
     "/add <название> — подписаться\n"
     "/remove <название> — отписаться\n"
     "/list — подписки\n"
     "/history — история\n"
-    "/play <название> — открыть на сайте\n"
     "/webapp — открыть WebApp\n"
     "/help — это сообщение\n"
 )
@@ -86,7 +93,10 @@ def send_card_with_buttons(chat_id, query):
             bot.send_message(chat_id, caption, parse_mode='HTML', reply_markup=kb)
     except Exception:
         logging.exception("send_card_with_buttons failed")
-        bot.send_message(chat_id, caption, parse_mode='HTML', reply_markup=kb)
+        try:
+            bot.send_message(chat_id, caption, parse_mode='HTML', reply_markup=kb)
+        except Exception:
+            logging.exception("send_card fallback failed")
 
 @bot.message_handler(commands=['start','help'])
 def cmd_start(message):
@@ -203,18 +213,24 @@ def subs_loop(interval=1800):
 threading.Thread(target=subs_loop, args=(1800,), daemon=True).start()
 
 app = Flask(__name__)
-
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 @app.route("/" + BOT_TOKEN, methods=['POST'])
 def receive_update():
     payload = request.get_data().decode('utf-8')
-    logging.info("INCOMING UPDATE (first 1000 chars): %s", payload[:1000])
+    logging.info("INCOMING UPDATE (first 2000 chars): %s", payload[:2000])
     try:
         update = telebot.types.Update.de_json(payload)
-        bot.process_new_updates([update])
+        try:
+            bot.process_new_updates([update])
+        except Exception:
+            logging.exception("process_new_updates failed")
+            try:
+                bot.send_message(ADMIN_CHAT, f"process_new_updates failed. See logs.")
+            except Exception:
+                logging.exception("notify admin failed")
     except Exception:
-        logging.exception("process update failed")
+        logging.exception("receive_update parse failed")
     return "ok", 200
 
 @app.route("/set_webhook", methods=['GET'])
@@ -245,6 +261,31 @@ def webhook_info():
     except Exception:
         logging.exception("webhook_info error")
         return "error", 500
+
+@app.route("/debug_send", methods=['GET'])
+def debug_send():
+    chat_id = request.args.get("chat_id")
+    text = request.args.get("text", "test")
+    if not chat_id:
+        return "chat_id required", 400
+    try:
+        bot.send_message(int(chat_id), text)
+        return "ok", 200
+    except Exception:
+        logging.exception("debug_send failed")
+        return "error", 500
+
+@app.route("/simulate_update", methods=['POST'])
+def simulate_update():
+    data = request.get_json(force=True, silent=True) or {}
+    logging.info("SIMULATED UPDATE: %s", json.dumps(data)[:2000])
+    try:
+        update = telebot.types.Update.de_json(json.dumps(data))
+        bot.process_new_updates([update])
+    except Exception:
+        logging.exception("simulate_update failed")
+        return "error", 500
+    return "ok", 200
 
 @app.route("/")
 def index():
